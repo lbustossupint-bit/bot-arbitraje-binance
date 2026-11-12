@@ -4,36 +4,31 @@ import time
 import threading
 from flask import Flask
 
-# ==========================================
-# ⚙️ SERVIDOR WEB (Para mantenerlo vivo en Render)
-# ==========================================
 app = Flask(__name__)
+
+# --- CONFIGURACIÓN DESDE ENVIRONMENT ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+
+try:
+    UMBRAL_BRECHA_PCT = float(os.environ.get("UMBRAL_BRECHA_PCT", 1.6))
+except ValueError:
+    UMBRAL_BRECHA_PCT = 1.6
+
+INTERVALO_SEGUNDOS = 30
+COOLDOWN_ALERTAS = 300
+
+bot_iniciado = False
 
 @app.route('/')
 def home():
     return "🤖 Bot de Arbitraje Binance activo 24/7."
 
-def run_flask():
-    # Render asigna automáticamente el puerto en la variable PORT
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# ==========================================
-# ⚙️ CONFIGURACIÓN DEL BOT
-# ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "PEGA_AQUI_TU_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PEGA_AQUI_TU_CHAT_ID")
-
-# Umbral de brecha configurado en 1.6%
-UMBRAL_BRECHA_PCT = float(os.environ.get("UMBRAL_BRECHA_PCT", 1.6))
-INTERVALO_SEGUNDOS = 30
-COOLDOWN_ALERTAS = 300
-
-# ==========================================
-# 📡 FUNCIONES DE CONEXIÓN
-# ==========================================
 def enviar_alerta_telegram(mensaje):
-    """Envía un mensaje formateado a tu chat de Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ ERROR: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no están configurados.")
+        return
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -41,12 +36,16 @@ def enviar_alerta_telegram(mensaje):
         "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=5)
+        res = requests.post(url, json=payload, timeout=5)
+        datos = res.json()
+        if not datos.get("ok"):
+            print(f"❌ Error de Telegram API: {datos.get('description')}")
+        else:
+            print("✅ Mensaje enviado con éxito a Telegram.")
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
 def obtener_precio_spot():
-    """Obtiene el último precio del par USDTARS en Spot."""
     url = "https://api.binance.com/api/v3/ticker/price?symbol=USDTARS"
     try:
         res = requests.get(url, timeout=5).json()
@@ -57,11 +56,6 @@ def obtener_precio_spot():
     return None
 
 def obtener_precio_p2p(trade_type="BUY"):
-    """
-    Obtiene el mejor precio disponible en el P2P de Binance.
-    trade_type='BUY'  -> Tu precio para comprar USDT (lo que piden vendedores)
-    trade_type='SELL' -> Tu precio para vender USDT (lo que ofrecen compradores)
-    """
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {
         "Content-Type": "application/json",
@@ -85,11 +79,8 @@ def obtener_precio_p2p(trade_type="BUY"):
         print(f"⚠️ Error P2P ({trade_type}): {e}")
     return None
 
-# ==========================================
-# 🚀 MONITOREO PRINCIPAL
-# ==========================================
 def iniciar_bot():
-    print("🚀 Bot de Arbitraje iniciado en segundo plano...")
+    print("🚀 Iniciando bucle de monitoreo Spot vs P2P...")
     enviar_alerta_telegram("🤖 *Bot de Arbitraje Binance desplegado en Render y activo 24/7...*")
 
     while True:
@@ -99,9 +90,7 @@ def iniciar_bot():
             p2p_venta = obtener_precio_p2p("SELL")
 
             if precio_spot and p2p_compra and p2p_venta:
-                # Comprar en Spot y Vender en P2P
                 brecha_spot_a_p2p = ((p2p_venta - precio_spot) / precio_spot) * 100
-                # Comprar en P2P y Vender en Spot
                 brecha_p2p_a_spot = ((precio_spot - p2p_compra) / p2p_compra) * 100
 
                 timestamp = time.strftime("%H:%M:%S")
@@ -124,14 +113,13 @@ def iniciar_bot():
 
         time.sleep(INTERVALO_SEGUNDOS)
 
-# ==========================================
-# 🏁 PUNTO DE ENTRADA
-# ==========================================
-if __name__ == "__main__":
-    # Inicia el hilo del bot de monitoreo
+# --- INICIALIZACIÓN FUERA DEL IF MAIN (Para Gunicorn) ---
+if not bot_iniciado:
+    bot_iniciado = True
     t = threading.Thread(target=iniciar_bot)
     t.daemon = True
     t.start()
 
-    # Inicia el servidor Flask que requiere Render
-    run_flask()
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
